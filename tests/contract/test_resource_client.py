@@ -15,6 +15,7 @@ from rpdk.core.contract.resource_client import (
     prune_properties,
     prune_properties_from_model,
     prune_properties_if_not_exist_in_path,
+    prune_properties_which_dont_exist_in_path,
 )
 from rpdk.core.exceptions import InvalidProjectError
 from rpdk.core.test import (
@@ -52,6 +53,70 @@ SCHEMA_WITH_MULTIPLE_WRITE_PROPERTIES = {
     "createOnlyProperties": ["/properties/c"],
     "primaryIdentifier": ["/properties/c"],
     "writeOnlyProperties": ["/properties/d", "/properties/a"],
+}
+
+SCHEMA_ = {
+    "properties": {
+        "a": {"type": "number"},
+        "b": {"type": "number"},
+        "c": {"type": "number"},
+        "d": {"type": "number"},
+    },
+    "readOnlyProperties": ["/properties/b"],
+    "createOnlyProperties": ["/properties/c"],
+    "primaryIdentifier": ["/properties/c"],
+    "writeOnlyProperties": ["/properties/d"],
+}
+
+SCHEMA_WITH_NESTED_PROPERTIES = {
+    "properties": {
+        "a": {"type": "string"},
+        "g": {"type": "number"},
+        "b": {"$ref": "#/definitions/c"},
+        "f": {
+            "type": "array",
+            "items": {"$ref": "#/definitions/c"},
+        },
+        "h": {
+            "type": "array",
+            "insertionOrder": "false",
+            "items": {"$ref": "#/definitions/c"},
+        },
+    },
+    "definitions": {
+        "c": {
+            "type": "object",
+            "properties": {"d": {"type": "integer"}, "e": {"type": "integer"}},
+        }
+    },
+    "readOnlyProperties": ["/properties/a"],
+    "primaryIdentifier": ["/properties/a"],
+    "writeOnlyProperties": ["/properties/g"],
+}
+
+SCHEMA_WITH_COMPOSITE_KEY = {
+    "properties": {
+        "a": {"type": "number"},
+        "b": {"type": "number"},
+        "c": {"type": "number"},
+        "d": {"type": "number"},
+    },
+    "readOnlyProperties": ["/properties/d"],
+    "createOnlyProperties": ["/properties/c"],
+    "primaryIdentifier": ["/properties/c", "/properties/d"],
+}
+
+SCHEMA_WITH_ADDITIONAL_IDENTIFIERS = {
+    "properties": {
+        "a": {"type": "number"},
+        "b": {"type": "number"},
+        "c": {"type": "number"},
+        "d": {"type": "number"},
+    },
+    "readOnlyProperties": ["/properties/b"],
+    "createOnlyProperties": ["/properties/c"],
+    "primaryIdentifier": ["/properties/c"],
+    "additionalIdentifiers": [["/properties/b"]],
 }
 
 
@@ -131,6 +196,96 @@ def resource_client_inputs():
     return client
 
 
+@pytest.fixture(params=[SCHEMA_, SCHEMA_WITH_ADDITIONAL_IDENTIFIERS])
+def resource_client_inputs_schema(request):
+    endpoint = "https://"
+    patch_sesh = patch(
+        "rpdk.core.contract.resource_client.create_sdk_session", autospec=True
+    )
+    patch_creds = patch(
+        "rpdk.core.contract.resource_client.get_temporary_credentials",
+        autospec=True,
+        return_value={},
+    )
+    patch_account = patch(
+        "rpdk.core.contract.resource_client.get_account",
+        autospec=True,
+        return_value=ACCOUNT,
+    )
+    with patch_sesh as mock_create_sesh, patch_creds as mock_creds:
+        with patch_account as mock_account:
+            mock_sesh = mock_create_sesh.return_value
+            mock_sesh.region_name = DEFAULT_REGION
+            client = ResourceClient(
+                DEFAULT_FUNCTION,
+                endpoint,
+                DEFAULT_REGION,
+                request.param,
+                EMPTY_OVERRIDE,
+                {
+                    "CREATE": {"a": 111, "c": 2, "d": 3},
+                    "UPDATE": {"a": 1, "c": 2},
+                    "INVALID": {"c": 3},
+                },
+            )
+
+    mock_sesh.client.assert_called_once_with("lambda", endpoint_url=endpoint)
+    mock_creds.assert_called_once_with(mock_sesh, LOWER_CAMEL_CRED_KEYS, None)
+    mock_account.assert_called_once_with(mock_sesh, {})
+
+    assert client._function_name == DEFAULT_FUNCTION
+    assert client._schema == request.param
+    assert client._overrides == EMPTY_OVERRIDE
+    assert client.account == ACCOUNT
+
+    return client
+
+
+@pytest.fixture
+def resource_client_inputs_composite_key():
+    endpoint = "https://"
+    patch_sesh = patch(
+        "rpdk.core.contract.resource_client.create_sdk_session", autospec=True
+    )
+    patch_creds = patch(
+        "rpdk.core.contract.resource_client.get_temporary_credentials",
+        autospec=True,
+        return_value={},
+    )
+    patch_account = patch(
+        "rpdk.core.contract.resource_client.get_account",
+        autospec=True,
+        return_value=ACCOUNT,
+    )
+    with patch_sesh as mock_create_sesh, patch_creds as mock_creds:
+        with patch_account as mock_account:
+            mock_sesh = mock_create_sesh.return_value
+            mock_sesh.region_name = DEFAULT_REGION
+            client = ResourceClient(
+                DEFAULT_FUNCTION,
+                endpoint,
+                DEFAULT_REGION,
+                SCHEMA_WITH_COMPOSITE_KEY,
+                EMPTY_OVERRIDE,
+                {
+                    "CREATE": {"a": 111, "c": 2},
+                    "UPDATE": {"a": 1, "c": 2},
+                    "INVALID": {"c": 3},
+                },
+            )
+
+    mock_sesh.client.assert_called_once_with("lambda", endpoint_url=endpoint)
+    mock_creds.assert_called_once_with(mock_sesh, LOWER_CAMEL_CRED_KEYS, None)
+    mock_account.assert_called_once_with(mock_sesh, {})
+
+    assert client._function_name == DEFAULT_FUNCTION
+    assert client._schema == SCHEMA_WITH_COMPOSITE_KEY
+    assert client._overrides == EMPTY_OVERRIDE
+    assert client.account == ACCOUNT
+
+    return client
+
+
 def test_prune_properties():
     document = {
         "foo": "bar",
@@ -184,6 +339,21 @@ def test_prune_properties_if_not_exist_in_path():
         ],
     )
     assert model == previous_model
+
+
+def test_prune_properties_which_dont_exist_in_path():
+    model = {
+        "spam": "eggs",
+        "one": "two",
+        "array": ["first", "second"],
+    }
+    model1 = prune_properties_which_dont_exist_in_path(
+        model,
+        [
+            ("properties", "one"),
+        ],
+    )
+    assert model1 == {"one": "two"}
 
 
 def test_init_sam_cli_client():
@@ -1058,3 +1228,73 @@ def test_generate_update_example_with_inputs(resource_client_inputs):
 
 def test_generate_invalid_update_example_with_inputs(resource_client_inputs):
     assert resource_client_inputs.generate_invalid_update_example({"a": 1}) == {"b": 2}
+
+
+def test_generate_update_example_with_primary_identifier(resource_client_inputs_schema):
+    created_resource = resource_client_inputs_schema.generate_create_example()
+    # adding read only property to denote a realistic scenario
+    created_resource["b"] = 2
+    updated_resource = resource_client_inputs_schema.generate_update_example(
+        created_resource
+    )
+    assert updated_resource == {"a": 1, "c": 2, "b": 2}
+
+
+def test_generate_update_example_with_composite_key(
+    resource_client_inputs_composite_key,
+):
+    created_resource = resource_client_inputs_composite_key.generate_create_example()
+    created_resource.update({"d": 3})  # mocking value of d as it is a readOnly property
+    updated_resource = resource_client_inputs_composite_key.generate_update_example(
+        created_resource
+    )
+    assert updated_resource == {"a": 1, "c": 2, "d": 3}
+
+
+def test_compare_should_pass(resource_client):
+    resource_client._update_schema(SCHEMA_WITH_NESTED_PROPERTIES)
+    inputs = {"b": {"d": 1}, "f": [{"d": 1}], "h": [{"d": 1}, {"d": 2}]}
+
+    outputs = {
+        "b": {"d": 1, "e": 3},
+        "f": [{"d": 1, "e": 2}],
+        "h": [{"d": 1, "e": 3}, {"d": 2}],
+    }
+    resource_client.compare(inputs, outputs)
+
+
+def test_compare_should_throw_exception(resource_client):
+    resource_client._update_schema(SCHEMA_WITH_NESTED_PROPERTIES)
+    inputs = {"b": {"d": 1}, "f": [{"d": 1}], "h": [{"d": 1}], "z": 1}
+
+    outputs = {
+        "b": {"d": 1, "e": 2},
+        "f": [{"d": 1}],
+        "h": [{"d": 1}],
+    }
+    try:
+        resource_client.compare(inputs, outputs)
+    except AssertionError:
+        logging.debug("This test expects Assertion Exception to be thrown")
+
+
+def test_compare_should_throw_key_error(resource_client):
+    resource_client._update_schema(SCHEMA_WITH_NESTED_PROPERTIES)
+    inputs = {"b": {"d": 1}, "f": [{"d": 1}], "h": [{"d": 1}]}
+
+    outputs = {"b": {"d": 1, "e": 2}, "f": [{"d": 1, "e": 2}, {"d": 2, "e": 3}]}
+    try:
+        resource_client.compare(inputs, outputs)
+    except AssertionError:
+        logging.debug("This test expects Assertion Exception to be thrown")
+
+
+def test_compare_ordered_list_throws_assertion_exception(resource_client):
+    resource_client._update_schema(SCHEMA_WITH_NESTED_PROPERTIES)
+    inputs = {"b": {"d": 1}, "f": [{"d": 1}], "h": [{"d": 1}]}
+
+    outputs = {"b": {"d": 1, "e": 2}, "f": [{"e": 2}, {"d": 2, "e": 3}]}
+    try:
+        resource_client.compare(inputs, outputs)
+    except AssertionError:
+        logging.debug("This test expects Assertion Exception to be thrown")

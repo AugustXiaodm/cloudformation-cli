@@ -8,7 +8,6 @@ from rpdk.core.contract.resource_client import (
 from rpdk.core.contract.suite.contract_asserts import (
     failed_event,
     response_contains_primary_identifier,
-    response_contains_resource_model_equal_current_model,
     response_contains_resource_model_equal_updated_model,
     response_contains_unchanged_primary_identifier,
     response_does_not_contain_write_only_properties,
@@ -47,10 +46,12 @@ def test_create_failure_if_repeat_writeable_id(resource_client, current_resource
 
 @response_contains_primary_identifier
 @response_does_not_contain_write_only_properties
-@response_contains_resource_model_equal_current_model
 def test_read_success(resource_client, current_resource_model):
     _status, response, _error_code = resource_client.call_and_assert(
         Action.READ, OperationStatus.SUCCESS, current_resource_model
+    )
+    test_input_equals_output(
+        resource_client, current_resource_model, response["resourceModel"]
     )
     return response
 
@@ -148,42 +149,21 @@ def test_delete_failure_not_found(resource_client, current_resource_model):
 
 def test_input_equals_output(resource_client, input_model, output_model):
     pruned_input_model = prune_properties_from_model(
-        input_model.copy(), resource_client.write_only_paths
+        input_model.copy(),
+        set(
+            list(resource_client.read_only_paths)
+            + list(resource_client.write_only_paths)
+        ),
     )
 
-    pruned_output_model = prune_properties_if_not_exist_in_path(
-        output_model.copy(), pruned_input_model, resource_client.read_only_paths
+    pruned_output_model = prune_properties_from_model(
+        output_model.copy(), resource_client.read_only_paths
     )
 
     pruned_output_model = prune_properties_if_not_exist_in_path(
         pruned_output_model, pruned_input_model, resource_client.create_only_paths
     )
-
-    assertion_error_message = (
-        "All properties specified in the request MUST "
-        "be present in the model returned, and they MUST"
-        " match exactly, with the exception of properties"
-        " defined as writeOnlyProperties in the resource schema"
+    resource_client.compare(
+        pruned_input_model,
+        pruned_output_model,
     )
-    # only comparing properties in input model to those in output model and
-    # ignoring extraneous properties that maybe present in output model.
-    try:
-        for key in pruned_input_model:
-            if key in resource_client.properties_without_insertion_order:
-                assert test_unordered_list_match(
-                    pruned_input_model[key], pruned_output_model[key]
-                )
-            else:
-                assert (
-                    pruned_input_model[key] == pruned_output_model[key]
-                ), assertion_error_message
-    except KeyError as e:
-        raise AssertionError(assertion_error_message) from e
-
-
-def test_unordered_list_match(inputs, outputs):
-    assert len(inputs) == len(outputs)
-    try:
-        assert all(input in outputs for input in inputs)
-    except KeyError as exception:
-        raise AssertionError("lists do not match") from exception

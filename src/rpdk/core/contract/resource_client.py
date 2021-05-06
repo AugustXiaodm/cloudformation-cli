@@ -64,6 +64,24 @@ def prune_properties_if_not_exist_in_path(output_model, input_model, paths):
     return output_document["properties"]
 
 
+def prune_properties_which_dont_exist_in_path(model, paths):
+    """Prunes model to properties present in path. This method removes any property
+    from the model which does not exists in the paths
+
+    This assumes properties will always have an object (dict) as a parent.
+    The function returns the model after pruning all but the path which exists
+    in the paths tuple from the input_model
+    """
+    document = {"properties": model.copy()}
+    for model_path in model.keys():
+        path_tuple = ("properties", model_path)
+        if path_tuple not in paths:
+            _prop, resolved_path, parent = traverse(document, path_tuple)
+            key = resolved_path[-1]
+            del parent[key]
+    return document["properties"]
+
+
 def path_exists(document, path):
     try:
         _prop, _resolved_path, _parent = traverse(document, path)
@@ -267,9 +285,51 @@ class ResourceClient:  # pylint: disable=too-many-instance-attributes
         example = self.invalid_strategy.example()
         return override_properties(example, self._overrides.get("CREATE", {}))
 
+    def get_unique_keys_for_model(self, create_model):
+        return {
+            k: v
+            for k, v in create_model.items()
+            if self.is_property_in_path(k, self.primary_identifier_paths)
+            or any(
+                map(
+                    lambda additional_identifier_paths, key=k: self.is_property_in_path(
+                        key, additional_identifier_paths
+                    ),
+                    self._additional_identifiers_paths,
+                )
+            )
+        }
+
+    @staticmethod
+    def is_property_in_path(key, paths):
+        for path in paths:
+            prop = fragment_list(path, "properties")[0]
+            if prop == key:
+                return True
+        return False
+
+    def validate_update_example_keys(self, unique_identifiers, update_example):
+        for primary_identifier in self.primary_identifier_paths:
+            if primary_identifier in self.create_only_paths:
+                primary_key = fragment_list(primary_identifier, "properties")[0]
+                assert update_example[primary_key] == unique_identifiers[primary_key], (
+                    "Any createOnlyProperties specified in update handler input "
+                    "MUST NOT be different from their previous state"
+                )
+
     def generate_update_example(self, create_model):
         if self._inputs:
-            return {**create_model, **self._inputs["UPDATE"]}
+            unique_identifiers = self.get_unique_keys_for_model(create_model)
+            update_example = self._inputs["UPDATE"]
+            if self.create_only_paths:
+                self.validate_update_example_keys(unique_identifiers, update_example)
+            update_example.update(unique_identifiers)
+            create_model_with_read_only_properties = (
+                prune_properties_which_dont_exist_in_path(
+                    create_model, self.read_only_paths
+                )
+            )
+            return {**create_model_with_read_only_properties, **update_example}
         overrides = self._overrides.get("UPDATE", self._overrides.get("CREATE", {}))
         example = override_properties(self.update_strategy.example(), overrides)
         return {**create_model, **example}
@@ -280,6 +340,29 @@ class ResourceClient:  # pylint: disable=too-many-instance-attributes
         overrides = self._overrides.get("UPDATE", self._overrides.get("CREATE", {}))
         example = override_properties(self.invalid_strategy.example(), overrides)
         return {**create_model, **example}
+
+    def compare(self, inputs, outputs):
+        assertion_error_message = (
+            "All properties specified in the request MUST "
+            "be present in the model returned, and they MUST"
+            " match exactly, with the exception of properties"
+            " defined as writeOnlyProperties in the resource schema"
+        )
+        try:
+            for key in inputs:
+                if isinstance(inputs[key], dict):
+                    self.compare(inputs[key], outputs[key])
+                elif isinstance(inputs[key], list):
+                    assert len(inputs[key]) == len(outputs[key])
+                    self.compare_list(inputs[key], outputs[key])
+                else:
+                    assert inputs[key] == outputs[key], assertion_error_message
+        except KeyError as e:
+            raise AssertionError(assertion_error_message) from e
+
+    def compare_list(self, inputs, outputs):
+        for index in range(len(inputs)):  # pylint: disable=C0200
+            self.compare(inputs[index], outputs[index])
 
     @staticmethod
     def key_error_safe_traverse(resource_model, write_only_property):

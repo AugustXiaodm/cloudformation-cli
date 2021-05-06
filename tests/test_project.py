@@ -10,6 +10,7 @@ import zipfile
 from contextlib import contextmanager
 from io import StringIO
 from pathlib import Path
+from shutil import copyfile
 from unittest.mock import ANY, MagicMock, patch
 
 import pytest
@@ -26,6 +27,7 @@ from rpdk.core.exceptions import (
 )
 from rpdk.core.plugin_base import LanguagePlugin
 from rpdk.core.project import (
+    CFN_METADATA_FILENAME,
     LAMBDA_RUNTIMES,
     OVERRIDES_FILENAME,
     SCHEMA_UPLOAD_FILENAME,
@@ -66,6 +68,12 @@ DESCRIBE_TYPE_FAILED_RETURN = {
 CREATE_INPUTS_FILE = "inputs/inputs_1_create.json"
 UPDATE_INPUTS_FILE = "inputs/inputs_1_update.json"
 INVALID_INPUTS_FILE = "inputs/inputs_1_invalid.json"
+
+PLUGIN_INFORMATION = {
+    "plugin-version": "2.1.3",
+    "plugin-tool-version": "2.0.8",
+    "plugin-name": "java",
+}
 
 
 @pytest.mark.parametrize("string", ["^[a-z]$", "([a-z])", ".*", "*."])
@@ -127,6 +135,7 @@ def test_load_settings_valid_json_for_resource(project):
             "runtime": RUNTIME,
             "entrypoint": None,
             "testEntrypoint": None,
+            "futureProperty": "value",
         }
     )
     patch_load = patch(
@@ -643,12 +652,35 @@ def test_load_invalid_schema(project):
     assert "invalid" in str(excinfo.value)
 
 
-def test_load_module_project_succeeds(project):
+def test_load_module_project_succeeds(project, tmp_path_factory):
     project.artifact_type = "MODULE"
     project.type_name = "Unit::Test::Malik::MODULE"
+    project.root = tmp_path_factory.mktemp("load_module_test")
+    os.mkdir(os.path.join(project.root, "fragments"))
+    copyfile(
+        os.path.join(
+            os.path.dirname(__file__),
+            "data/sample_fragments/fragments/valid_fragment.json",
+        ),
+        os.path.join(project.root, "fragments/valid_fragment.json"),
+    )
     patch_load_settings = patch.object(
         project, "load_settings", return_value={"artifact_type": "MODULE"}
     )
+
+    assert not os.path.exists(os.path.join(project.root, "schema.json"))
+    with patch_load_settings:
+        project.load()
+    assert os.path.exists(os.path.join(project.root, "schema.json"))
+
+
+def test_load_resource_succeeds(project):
+    project.artifact_type = "Resource"
+    project.type_name = "Unit::Test::Resource"
+    patch_load_settings = patch.object(
+        project, "load_settings", return_value={"artifact_type": "RESOURCE"}
+    )
+    project._write_example_schema()
     with patch_load_settings:
         project.load()
 
@@ -742,6 +774,8 @@ def test_submit_dry_run(project):
     # these context managers can't be wrapped by black, but it removes the \
     with patch_plugin as mock_plugin, patch_path as mock_path, \
             patch_temp as mock_temp, patch_upload as mock_upload:
+        mock_plugin.get_plugin_information = MagicMock(return_value=PLUGIN_INFORMATION)
+
         project.submit(
             True,
             endpoint_url=ENDPOINT,
@@ -753,7 +787,7 @@ def test_submit_dry_run(project):
     # fmt: on
 
     mock_temp.assert_not_called()
-    mock_path.assert_called_once_with("{}.zip".format(project.hypenated_name))
+    mock_path.assert_called_with("{}.zip".format(project.hypenated_name))
     mock_plugin.package.assert_called_once_with(project, ANY)
     mock_upload.assert_not_called()
 
@@ -765,6 +799,7 @@ def test_submit_dry_run(project):
             CREATE_INPUTS_FILE,
             INVALID_INPUTS_FILE,
             UPDATE_INPUTS_FILE,
+            CFN_METADATA_FILENAME,
         }
         schema_contents = zip_file.read(SCHEMA_UPLOAD_FILENAME).decode("utf-8")
         assert schema_contents == CONTENTS_UTF8
@@ -775,11 +810,15 @@ def test_submit_dry_run(project):
         # https://docs.python.org/3/library/zipfile.html#zipfile.ZipFile.testzip
         input_create = json.loads(zip_file.read(CREATE_INPUTS_FILE).decode("utf-8"))
         assert input_create == {}
-        input_invalid = json.loads(zip_file.read(UPDATE_INPUTS_FILE).decode("utf-8"))
+        input_invalid = json.loads(zip_file.read(INVALID_INPUTS_FILE).decode("utf-8"))
         assert input_invalid == {}
-        input_update = json.loads(zip_file.read(INVALID_INPUTS_FILE).decode("utf-8"))
+        input_update = json.loads(zip_file.read(UPDATE_INPUTS_FILE).decode("utf-8"))
         assert input_update == {}
         assert zip_file.testzip() is None
+        metadata_info = json.loads(zip_file.read(CFN_METADATA_FILENAME).decode("utf-8"))
+        assert "cli-version" in metadata_info
+        assert "plugin-version" in metadata_info
+        assert "plugin-tool-version" in metadata_info
 
 
 def test_submit_dry_run_modules(project):
@@ -829,7 +868,7 @@ def test_submit_dry_run_modules(project):
     # fmt: on
 
     mock_temp.assert_not_called()
-    mock_path.assert_called_once_with("{}.zip".format(project.hypenated_name))
+    mock_path.assert_called_with("{}.zip".format(project.hypenated_name))
     mock_plugin.package.assert_not_called()
     mock_upload.assert_not_called()
 
@@ -1043,7 +1082,7 @@ def test__upload_good_path_skip_role_creation(
             "LogRoleArn": "some-log-role-arn",
             "LogGroupName": "aws-color-red-logs",
         },
-        **expected_additional_args
+        **expected_additional_args,
     )
 
 
